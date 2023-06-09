@@ -1,6 +1,7 @@
 #include "../common.h"
 #include <arpa/inet.h>
 #include <errno.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +10,8 @@
 #include <time.h>
 
 int server_sock = -1;
+struct sockaddr* server_addr = NULL;
+socklen_t server_addr_len = 0;
 
 void cleanup(void)
 {
@@ -110,7 +113,7 @@ void emulateStealer(void)
 
     // Wait for server to start.
     char buffer_char;
-    if (recv(server_sock, &buffer_char, sizeof(buffer_char), 0) == -1) {
+    if (recvfrom(server_sock, &buffer_char, sizeof(buffer_char), 0, server_addr, &server_addr_len) == -1) {
         printf("[Stealer Error] Failed to receive start notification from server: %s\n", strerror(errno));
         return;
     }
@@ -124,13 +127,13 @@ void emulateStealer(void)
         printf("[Stealer] Stolen a new item with price: %d\n", stolen_item);
         // Send server the price of a new item.
         // Additionally, this notifies server to unblock loader.
-        if (send(server_sock, &stolen_item, sizeof(stolen_item), 0) == -1) {
+        if (sendto(server_sock, &stolen_item, sizeof(stolen_item), 0, server_addr, server_addr_len) == -1) {
             printf("[Stealer Error] Failed to send the price of a new item to server: %s\n", strerror(errno));
             return;
         }
 
         // Block until server notifies us that loader has received the item.
-        if (recv(server_sock, &buffer_char, sizeof(buffer_char), 0) == -1) {
+        if (recvfrom(server_sock, &buffer_char, sizeof(buffer_char), 0, server_addr, &server_addr_len) == -1) {
             printf("[Stealer Error] Failed to receive loader-received notification from server: %s\n", strerror(errno));
             return;
         }
@@ -141,7 +144,7 @@ void emulateStealer(void)
     // Notify Loader that there are no more items to steal.
     // We do that by sending an item with a negative price.
     int negative_price = -1;
-    if (send(server_sock, &negative_price, sizeof(negative_price), 0) == -1) {
+    if (sendto(server_sock, &negative_price, sizeof(negative_price), 0, server_addr, server_addr_len) == -1) {
         printf("[Stealer Error] Failed to send ending notification to server: %s\n", strerror(errno));
         return;
     }
@@ -161,13 +164,13 @@ void emulateLoader(void)
         // Receive a new item price from server.
         // Additionally, recv() will block until the data is received,
         // acting as a synchronisation mechanism.
-        if (recv(server_sock, &item_price, sizeof(item_price), 0) == -1) {
+        if (recvfrom(server_sock, &item_price, sizeof(item_price), 0, server_addr, &server_addr_len) == -1) {
             printf("[Loader Error] Failed to receive a new item price from server: %s\n", strerror(errno));
             return;
         }
 
         // Notify server that we got the item.
-        if (send(server_sock, &buffer_char, sizeof(buffer_char), 0) == -1) {
+        if (sendto(server_sock, &buffer_char, sizeof(buffer_char), 0, server_addr, server_addr_len) == -1) {
             printf("[Loader Error] Failed to send new item acknowledgement to server: %s\n", strerror(errno));
             return;
         }
@@ -177,7 +180,7 @@ void emulateLoader(void)
         emulateActivity();
 
         // Send the item price to server.
-        if (send(server_sock, &item_price, sizeof(item_price), 0) == -1) {
+        if (sendto(server_sock, &item_price, sizeof(item_price), 0, server_addr, server_addr_len) == -1) {
             printf("[Loader Error] Failed to send item price to server: %s\n", strerror(errno));
             return;
         }
@@ -205,7 +208,7 @@ void emulateObserver(void)
         printf("[Observer] Standing by, looking out for officers nearby...\n");
 
         // Receive a new item price from server.
-        if (recv(server_sock, &item_price, sizeof(item_price), 0) == -1) {
+        if (recvfrom(server_sock, &item_price, sizeof(item_price), 0, server_addr, &server_addr_len) == -1) {
             printf("[Observer] Failed to receive a new item price from server: %s\n", strerror(errno));
             return;
         }
@@ -263,21 +266,25 @@ int main(int argc, char const** argv)
     char const* server_ip = argc == 3 ? argv[2] : DEFAULT_IP;
 
     // Create socket.
-    server_sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+    server_sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (server_sock == -1) {
         printf("[Client Error] Failed to create socket: %s\n", strerror(errno));
         return 1;
     }
 
     // Construct address structure.
-    struct sockaddr_in server_addr;
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = inet_addr(server_ip);
-    server_addr.sin_port = htons(server_port);
+    struct sockaddr_in server_addr_in;
+    server_addr_len = sizeof(server_addr_in);
+    memset(&server_addr_in, 0, server_addr_len);
+    server_addr_in.sin_family = AF_INET;
+    server_addr_in.sin_addr.s_addr = inet_addr(server_ip);
+    server_addr_in.sin_port = htons(server_port);
 
-    // Connect to the server.
-    if (connect(server_sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
+    server_addr = (struct sockaddr*)&server_addr_in; 
+
+    // Connect ot th server by sending a null-byte.
+    char buffer = '\0';
+    if (sendto(server_sock, &buffer, sizeof(buffer), 0, server_addr, server_addr_len) == -1) {
         printf("[Client Error] Failed to connect to %s:%d: %s\n", server_ip, server_port, strerror(errno));
         cleanup();
         return 1;
@@ -288,7 +295,7 @@ int main(int argc, char const** argv)
 
     // Receive role from server.
     char role;
-    if (recv(server_sock, &role, sizeof(role), 0) == -1) {
+    if (recvfrom(server_sock, &role, sizeof(role), 0, server_addr, &server_addr_len) == -1) {
         printf("[Client Error] Failed to receive role from server: %s\n", strerror(errno));
         cleanup();
         return 1;

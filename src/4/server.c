@@ -1,6 +1,7 @@
 #include "../common.h"
 #include <arpa/inet.h>
 #include <errno.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -12,17 +13,11 @@
 #define MAX_CLIENTS 3
 
 int server_sock = -1;
-int stealer_sock = -1;
-int loader_sock = -1;
-int observer_sock = -1;
 
 // Performs a cleanup of all resources.
 void cleanup(void)
 {
     closeFd(&server_sock);
-    closeFd(&stealer_sock);
-    closeFd(&loader_sock);
-    closeFd(&observer_sock);
 }
 
 void onInterruptReceived(int signum)
@@ -49,29 +44,24 @@ void printUsage(char const* cmd)
     printf("By default, <server_ip> = %s\n", DEFAULT_IP);
 }
 
-// Returns socket fd of the accepted connection.
-// On error, returns -1.
-int acceptConnection(int sock, char const* client_name, char role)
+// Returns 0 on success, -1 on error.
+int acceptConnection(char const* client_name, char role, struct sockaddr_in* client_addr, socklen_t* client_addr_len)
 {
     printf("[Server] Waiting for %s to connect...\n", client_name);
 
-    struct sockaddr_in client_addr;
-    socklen_t client_addr_len = sizeof(client_addr);
-
-    int const client_sock = accept(sock, (struct sockaddr*)&client_addr, &client_addr_len);
-    if (client_sock == -1) {
+    char buffer = '\0';    
+    if (recvfrom(server_sock, &buffer, sizeof(buffer), 0, (struct sockaddr*)client_addr, client_addr_len) == -1) {
         printf("[Server Error] Failed to accept %s's connection: %s\n", client_name, strerror(errno));
         return -1;
     }
 
     // Assigning client a role.
-    if (send(client_sock, &role, sizeof(role), 0) == -1) {
+    if (sendto(server_sock, &role, sizeof(role), 0, (struct sockaddr*)client_addr, *client_addr_len) == -1) {
         printf("[Server Error] Failed to assign client a role: %s\n", strerror(errno));
-        close(client_sock);
         return -1;
     }
 
-    return client_sock;
+    return 0;
 }
 
 int main(int argc, char const** argv)
@@ -106,7 +96,7 @@ int main(int argc, char const** argv)
     char const* server_ip = argc == 3 ? argv[2] : DEFAULT_IP;
 
     // Create socket.
-    int const server_sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+    server_sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (server_sock == -1) {
         printf("[Server Error] Failed to create socket: %s\n", strerror(errno));
         return 1;
@@ -126,19 +116,17 @@ int main(int argc, char const** argv)
         return 1;
     }
 
-    // Listen for incoming connections.
-    if (listen(server_sock, MAX_CLIENTS) == -1) {
-        printf("[Server Error] Failed to listen on port %d: %s\n", server_port, strerror(errno));
-        cleanup();
-        return 1;
-    }
-
     printf("[Server] Started on %s:%d\n", server_ip, server_port);
 
+    struct sockaddr_in stealer_addr, loader_addr, observer_addr;
+    socklen_t stealer_addr_len = sizeof(stealer_addr);
+    socklen_t loader_addr_len = sizeof(loader_addr);
+    socklen_t observer_addr_len = sizeof(observer_addr_len);
+
     // Accept Stealer, Loader, Observer (in this particular order).
-    if ((stealer_sock = acceptConnection(server_sock, "Stealer", CLIENT_TYPE_STEALER)) == -1
-        || (loader_sock = acceptConnection(server_sock, "Loader", CLIENT_TYPE_LOADER)) == -1
-        || (observer_sock = acceptConnection(server_sock, "Observer", CLIENT_TYPE_OBSERVER)) == -1) {
+    if (acceptConnection("Stealer", CLIENT_TYPE_STEALER, &stealer_addr, &stealer_addr_len) == -1
+        || acceptConnection("Loader", CLIENT_TYPE_LOADER, &loader_addr, &loader_addr_len) == -1
+        || acceptConnection("Observer", CLIENT_TYPE_OBSERVER, &observer_addr, &observer_addr_len) == -1) {
         printf("[Server Error] Failed to accept client's connection\n");
         cleanup();
         return 1;
@@ -146,7 +134,7 @@ int main(int argc, char const** argv)
 
     // Send a byte to Stealer to start.
     char buffer_char = '\0';
-    if (send(stealer_sock, &buffer_char, sizeof(buffer_char), 0) == -1) {
+    if (sendto(server_sock, &buffer_char, sizeof(buffer_char), 0, (struct sockaddr*)&stealer_addr, stealer_addr_len) == -1) {
         printf("[Server Error] Failed to send starting notification to Stealer: %s\n", strerror(errno));
         cleanup();
         return 1;
@@ -160,7 +148,7 @@ int main(int argc, char const** argv)
         printf("[Server] Waiting for data from Stealer...\n");
 
         // Receive data from Stealer.
-        if (recv(stealer_sock, &item_price, sizeof(item_price), 0) == -1) {
+        if (recvfrom(server_sock, &item_price, sizeof(item_price), 0, (struct sockaddr*)&stealer_addr, &stealer_addr_len) == -1) {
             printf("[Server Error] Failed to receive item price from Stealer: %s\n", strerror(errno));
             exit_code = 1;
             break;
@@ -169,14 +157,14 @@ int main(int argc, char const** argv)
         printf("[Server] Received data from Stealer, sending it Loader...\n");
 
         // Send the data to Loader.
-        if (send(loader_sock, &item_price, sizeof(item_price), 0) == -1) {
+        if (sendto(server_sock, &item_price, sizeof(item_price), 0, (struct sockaddr*)&loader_addr, loader_addr_len) == -1) {
             printf("[Server Error] Failed to send item price to Loader: %s\n", strerror(errno));
             exit_code = 1;
             break;
         }
 
         // Receive acknowledgement from Loader.
-        if (recv(loader_sock, &buffer_char, sizeof(buffer_char), 0) == -1) {
+        if (recvfrom(server_sock, &buffer_char, sizeof(buffer_char), 0, (struct sockaddr*)&loader_addr, &loader_addr_len) == -1) {
             printf("[Server Error] Failed to receive item acknowledgement from Loader: %s\n", strerror(errno));
             exit_code = 1;
             break;
@@ -184,7 +172,7 @@ int main(int argc, char const** argv)
 
         // Unblock Stealer after handing over the item only after
         // we received an item acknowledgement from Loader.
-        if (send(stealer_sock, &buffer_char, sizeof(buffer_char), 0) == -1) {
+        if (sendto(server_sock, &buffer_char, sizeof(buffer_char), 0, (struct sockaddr*)&stealer_addr, stealer_addr_len) == -1) {
             printf("[Server Error] Failed to send unblocking notification to Stealer: %s\n", strerror(errno));
             exit_code = 1;
             break;
@@ -193,7 +181,7 @@ int main(int argc, char const** argv)
         printf("[Server] Sent data to Loader, receiving data back from Loader...\n");
 
         // Receive the data from Loader.
-        if (recv(loader_sock, &item_price, sizeof(item_price), 0) == -1) {
+        if (recvfrom(server_sock, &item_price, sizeof(item_price), 0, (struct sockaddr*)&loader_addr, &loader_addr_len) == -1) {
             printf("[Server Error] Failed to receive item price from Loader: %s\n", strerror(errno));
             exit_code = 1;
             break;
@@ -202,7 +190,7 @@ int main(int argc, char const** argv)
         printf("[Server] Received data from Loader, sending data to Observer...\n");
 
         // Send the data to Observer.
-        if (send(observer_sock, &item_price, sizeof(item_price), 0) == -1) {
+        if (sendto(server_sock, &item_price, sizeof(item_price), 0, (struct sockaddr*)&observer_addr, observer_addr_len) == -1) {
             printf("[Server Error] Failed to send item price to Observer: %s\n", strerror(errno));
             exit_code = 1;
             break;
