@@ -49,7 +49,7 @@ int acceptConnection(char const* client_name, char role, struct sockaddr_in* cli
 {
     printf("[Server] Waiting for %s to connect...\n", client_name);
 
-    char buffer = '\0';    
+    char buffer = '\0';
     if (recvfrom(server_sock, &buffer, sizeof(buffer), 0, (struct sockaddr*)client_addr, client_addr_len) == -1) {
         printf("[Server Error] Failed to accept %s's connection: %s\n", client_name, strerror(errno));
         return -1;
@@ -145,6 +145,12 @@ int main(int argc, char const** argv)
     int exit_code = 0;
 
     while (item_price >= 0) {
+        if (sendto(server_sock, &buffer_char, sizeof(buffer_char), 0, (struct sockaddr*)&stealer_addr, stealer_addr_len) == -1) {
+            printf("[Server Error] Failed to send unblocking notification to Stealer: %s\n", strerror(errno));
+            exit_code = 1;
+            break;
+        }
+
         printf("[Server] Waiting for data from Stealer...\n");
 
         // Receive data from Stealer.
@@ -177,7 +183,7 @@ int main(int argc, char const** argv)
             exit_code = 1;
             break;
         }
-
+    
         printf("[Server] Sent data to Loader, receiving data back from Loader...\n");
 
         // Receive the data from Loader.

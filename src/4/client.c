@@ -125,6 +125,13 @@ void emulateStealer(void)
 
         int const stolen_item = items[i];
         printf("[Stealer] Stolen a new item with price: %d\n", stolen_item);
+
+        // Block until server notifies us that we can send the item.
+        if (recvfrom(server_sock, &buffer_char, sizeof(buffer_char), 0, server_addr, &server_addr_len) == -1) {
+            printf("[Stealer Error] Failed to receive notification from server: %s\n", strerror(errno));
+            return;
+        }
+
         // Send server the price of a new item.
         // Additionally, this notifies server to unblock loader.
         if (sendto(server_sock, &stolen_item, sizeof(stolen_item), 0, server_addr, server_addr_len) == -1) {
@@ -139,6 +146,12 @@ void emulateStealer(void)
         }
 
         printf("[Stealer] Handed over the item to Loader!\n");
+    }
+
+    // Block until server notifies us that we can send the item.
+    if (recvfrom(server_sock, &buffer_char, sizeof(buffer_char), 0, server_addr, &server_addr_len) == -1) {
+        printf("[Stealer Error] Failed to receive notification from server: %s\n", strerror(errno));
+        return;
     }
 
     // Notify Loader that there are no more items to steal.
@@ -280,7 +293,7 @@ int main(int argc, char const** argv)
     server_addr_in.sin_addr.s_addr = inet_addr(server_ip);
     server_addr_in.sin_port = htons(server_port);
 
-    server_addr = (struct sockaddr*)&server_addr_in; 
+    server_addr = (struct sockaddr*)&server_addr_in;
 
     // Connect ot th server by sending a null-byte.
     char buffer = '\0';
